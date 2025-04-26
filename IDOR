@@ -1,0 +1,254 @@
+Insecure Direct Object References (IDOR): A Complete Guide
+
+An IDOR is an access-control weakness where an application uses user-supplied identifiers (like IDs or filenames) to fetch objects without verifying permission. In practice, a tester intercepts API requests on a laptop and tweaks an object ID to see if the server returns unauthorized data. By simply editing a URL or JSON field, an attacker can bypass authorization and retrieve another user’s data. OWASP explains this as providing “direct access to objects based on user-supplied input,” which lets an attacker view or edit resources (files, database records, user profiles, etc.) that don’t belong to them. For example, if a web app fetches account info via GET /account?id=3, changing it to id=4 might return someone else’s account. In short, IDOR is a type of broken access control: the app trusts a user-controlled reference and fails to check that the user actually owns or should see the referenced object.
+
+What is IDOR?
+
+An Insecure Direct Object Reference is a flaw where an application exposes internal object identifiers (database keys, filenames, UUIDs, etc.) to the user and doesn’t enforce permissions on them. Attackers exploit this by modifying those identifiers. For instance, suppose user A’s profile is at user/1001. If the app allows any logged-in user to request user/1002, then user A could see user B’s profile. In essence, the app “takes user-supplied input and uses it to retrieve an object without performing sufficient authorization checks.” (OWASP). Insecure Direct Object References let attackers guess or enumerate IDs to access data they shouldn’t.  Wallarm’s IDOR FAQ summarizes it succinctly: an IDOR allows attackers *“to manipulate the data they are not supposed to access by guessing or manipulating object references.”*.  Because of this, OWASP explicitly lists “providing someone else’s unique identifier to view or edit their account” as a classic IDOR scenario.
+
+IDOR in Web Applications
+
+In web apps, IDOR typically shows up in URLs and form parameters. Common patterns include:
+
+Query Parameters (DB Records): A URL like GET /invoice?invoice=12345 that fetches invoice #12345 by ID. If an attacker logs in as one user and simply changes invoice=12345 to invoice=12346, they may retrieve another user’s invoice. OWASP’s testing guide uses this exact example: *“the value of the invoice parameter is used directly to retrieve a database record”*.
+
+Action/Function Parameters: Links or form fields that specify a username or key. For example, GET /change-password?user=alice. If a tester changes user=alice to user=bob and the app fails to check ownership, they could reset Bob’s password. This is the case of *“parameter used to perform an operation”*.
+
+File/Resource Retrieval: Endpoints that serve files or media by name or ID. For example, GET /showImage?img=img00011 might display user A’s photo. Changing it to img=img00012 (a file belonging to user B) could expose B’s image. OWASP notes this as “parameter used to retrieve a file system resource”, and indeed simply switching the file or img value can pull another user’s file.
+
+Feature Flags or Menu Access: Some apps use parameters to unlock UI features. E.g., GET /accessPage?menuitem=12 might show feature #12. By altering menuitem, a user might access admin-only pages they shouldn’t. In other words, *“parameter used to access application functionality”*.
+
+
+Each of the above is an IDOR because the app uses the parameter value directly to fetch or act on something. An attacker doesn’t need any fancy tools – just change the value in the URL or form and observe whether unauthorized data appears.
+
+IDOR in Web APIs
+
+Modern applications often use REST or GraphQL APIs, and IDORs appear there too. The difference is mainly in how object references are sent:
+
+Path or Query Parameters: Similar to web URLs, an API might have endpoints like GET /api/users?user_id=5 or GET /api/users/5/profile. Changing the ID in the URL (e.g. ?user_id=6) may return another user’s data if not checked.
+
+Request Body (JSON/XML): Many APIs take object IDs in request bodies. For instance, a password-reset API might use POST /api/reset with JSON {"user_id":1234, "new_password":"..."}. An attacker can intercept this and modify "user_id":1234 to a different valid user ID. If the server doesn’t verify that the requester is allowed, it will reset someone else’s password. Shady Farouk’s example demonstrates exactly this: changing the user_id in the body lets an attacker reset another account’s password.
+
+Headers/Cookies: Sometimes user identity is conveyed via cookies or custom headers. If a site stores Cookie: user_id=1234, a malicious client may edit that cookie to user_id=1233 and potentially hijack the other user’s session. (A HackerOne blog notes that poorly-randomized session cookies can be brute-forced similarly). Likewise, apps using headers like X-User-ID: 1234 for auth can be fooled if the server trusts them.
+
+GraphQL APIs: In GraphQL, queries often include object IDs as arguments. An attacker can first fetch the GraphQL schema (introspection) to discover query and mutation fields, then try altering ID arguments. For example, a GraphQL query might be query { invoice(id: 1) { ... } }. Changing id: 1 to id: 2 in the query could reveal a different invoice. Tools like GraphQL Voyager (which imports an introspected schema) make it easier to spot these reference fields.
+
+
+In short, any place an object ID appears in an API request, an attacker should try modifying it. If the API fails to enforce that the logged-in user owns or should see that object, you’ve found an IDOR.
+
+IDOR in Mobile Apps
+
+Mobile applications often use web APIs under the hood, so the same REST/GraphQL IDORs apply. Mobile-specific IDOR cases include:
+
+API Calls from the App: Attackers can intercept the app’s network traffic using a proxy (Burp, Fiddler) or dynamic instrumentation (Frida). If the app includes an object reference in a request (say, a numeric user ID or order ID in a JSON payload), the tester can modify it just like in a web API. IDOR is “prevalent” in mobile apps, so this is a major source of bugs.
+
+In-App Resources: Some mobile platforms have content providers or deep-link URIs. For example, an insecure Android content provider might allow any other app to query a database record by ID. If that ID is guessable or leakable, another app could grab sensitive data. Similarly, a deep link like myapp://open/user/1234 might open user #1234’s profile – changing that path parameter could work if not protected.
+
+
+Because mobile clients may expose extra or obscure endpoints, treat every API call the app makes as a potential IDOR vector. Use [Proxy tools or Frida] to modify requests on-the-fly and see if unauthorized data comes back. Security researchers often report IDOR in mobile contexts; for example, Appknox notes that “hackers often attempt to exploit IDOR vulnerabilities to gain unauthorized access to valuable data” in mobile apps.
+
+Detecting IDOR (2025 Techniques)
+
+Map all object references: First, enumerate every place where the app uses an identifier. This includes URLs, parameters, JSON fields, cookies, headers, etc. OWASP recommends using at least two accounts during testing so you can compare accessible objects. For example, if User A can list invoices 1001–1005, try using those IDs while logged in as User B to see if any leak.
+
+Parameter Tampering: The simplest IDOR test is to change one identifier at a time. If you see id=1001, try 1002, 1000, or a list of guessed IDs. Similarly, if you see username=user1, try numeric or other forms of IDs (some apps accept both). Web proxies (Burp Repeater) and API tools (Postman, Insomnia) make this easy. Observe if you get a 200 OK with another user’s data or some indication of success.
+
+Multiple Parameters / Pollution: Check if passing multiple values alters the behavior. For instance, GET /api/account?id=1&id=2 might cause the server to ignore one and apply the other. HTTP Parameter Pollution can sometimes expose the second ID’s data when only the first would normally apply.
+
+HTTP Method Changes: Some endpoints behave differently on GET vs POST/PUT. An endpoint might enforce access control on a GET, but not on a PUT. Try switching methods: for example, if GET /api/account?id=1 is fine, try PUT /api/account?id=1 or vice versa to see if you can alter data without checks.
+
+Content-Type Variations: Servers sometimes parse payloads differently depending on Content-Type. If an API expects JSON, try sending the same data as XML, form-data, or other types. A mismatched parser may skip auth checks. For example, sending JSON instead of the expected XML (or vice versa) on an IDOR-suspect endpoint can reveal unintended access.
+
+Alternate ID Formats: If the app accepts non-numeric IDs (like UUIDs or usernames), try numeric IDs instead. There may be multiple indexing schemes in the backend where one of them lacks proper checks. For instance, replace a username with a numeric user ID in the request.
+
+Wildcard and Array IDs: Although rare, some services might inadvertently allow array or wildcard values. For example, try wrapping a single ID in a JSON array ({"id":[19]} instead of {"id":19}). Or see if using a wildcard (GET /api/users/*) returns all users. These tricks exploit how the API handles JSON parsing or file paths.
+
+New or Unrestricted Features: Pay special attention to recently added features. A new mobile or web feature (profile upload, event pages, etc.) may not have been fully secured. If you find a fresh API endpoint (e.g. /api/newFeature/user/pp/<ID>), assume the same IDOR tactics apply until proven safe.
+
+
+Each of these techniques leverages the same idea: modify a reference and look for leakage. Manual testing should be systematic: intercept requests, craft tampered ones, and compare results. As OWASP advises, use multiple user accounts and deliberately attempt to access resources belonging to others.
+
+Automated Testing
+
+Automation can speed up IDOR discovery:
+
+Burp Suite + Extensions: Burp’s Active Scanner may catch some IDORs if they manifest as anomalies. More powerful are extensions like Autorize (it automates sending requests with different user sessions to check access) and AuthMatrix. The Paramalyzer extension is very useful: it records every parameter you see and lets you easily replay requests with new values. PwnFox can help switch between logged-in accounts in Burp, so you can quickly replay a request as different users.
+
+Fuzzing/Brute-forcing IDs: Tools like FFUF or Wfuzz can rapidly replace ID fields with ranges or wordlists of possible values. For example, configure FFUF to fuzz ?user_id=FUZZ with values 1–1000. If some responses contain valid data for multiple fuzzed values, that signals an IDOR.
+
+API Testing Tools: Tools like Postman or automated test scripts can be set up to replay entire API workflows with modified IDs. Swagger or Postman collections can be parameterized. Some API security platforms (e.g. Wallarm) now offer automated IDOR detection by analyzing access patterns.
+
+GraphQL-Specific: Use GraphQL introspection to grab the full schema. Burp’s InQL plugin or scripts can dump all fields. Then tools like GraphQL Voyager (which imports the schema) help visualize object relations. Once you see the queries and their parameters, you can automatically try different IDs in GraphQL queries (with tools or scripts) to find IDORs.
+
+Static/Code Analysis: Modern SAST tools (like Semgrep with OWASP rules) can flag potential IDOR patterns in code by detecting use of unchecked parameters. Netflix’s Gauntlet project (for broken auth) and other frameworks can be adapted to programmatically test endpoints for access-control failures.
+
+
+By 2025, many scanners include checks for horizontal access control. Still, manual review and creative fuzzer use remain essential for complex IDORs. Always supplement automation with hands-on testing.
+
+Tools for Finding IDOR
+
+Burp Suite (Professional): The go-to proxy. Use Repeater to manually tweak requests and Intruder to brute-force IDs. Its built-in logger and comparer help see differences. Burp extensions are key (see above).
+
+Burp Extensions:
+
+Paramalyzer – records all parameters sent to each host, making it easy to reuse and tamper IDs.
+
+Autorize – automatically resends logged requests under different session (role) contexts to find authorization gaps.
+
+PwnFox – manages multiple credentials/cookies to simulate different users.
+
+
+Postman / Insomnia: Great for crafting and replaying API calls with modified JSON bodies. Use environment variables to swap user IDs quickly.
+
+Fuzzing Tools: FFUF, Wfuzz – perform rapid brute-forcing of URL parameters or body fields. For example, fuzzing /user/FUZZ with numeric ranges. These can uncover predictable ID sequences.
+
+OWASP ZAP: Its fuzzer can substitute values in requests. Active Scanner might catch some IDORs, especially if complemented by a context setup with multiple user accounts.
+
+IDOR-Specific Tools: While there isn’t a single “IDOR scanner” that works out-of-the-box, multi-tool approaches (or custom scripts) are common. Netflix’s Gauntlet is an example framework for testing access controls; it can be adapted to brute different object IDs.
+
+SQLMap: If an IDOR returns raw data (e.g. via a JSON or SQL error), SQLMap or similar might help enumerate numeric IDs or union results as a side-channel.
+
+GraphQL Tools:
+
+GraphQL Voyager – visualizes your GraphQL schema, highlighting object relations.
+
+InQL (Burp plugin) – automatically enumerates GraphQL fields and parameters for fuzzing.
+
+
+Mobile App Tools:
+
+Frida – hook the app to change API calls on the fly.
+
+Burp Mobile Assistant or local proxy – intercept an app’s traffic. Once proxied, use the same techniques as for web.
+
+
+Other: Network proxies (Fiddler), browser devtools, or any HTTP client can be used. The key is to capture the traffic and modify the IDs.
+
+
+Practical Payload Examples
+
+Below are typical examples of how IDOR payloads look. These illustrate how a slight change in the request gives unauthorized access:
+
+Simple URL Tampering:
+
+GET /api/profile?id=1001 HTTP/1.1
+Host: example.com
+
+An attacker changes 1001 to 1002:
+
+GET /api/profile?id=1002 HTTP/1.1
+
+If IDOR exists, the server will return User 1002’s profile even though the attacker is not that user.
+
+Query Parameter in Path:
+
+GET /orders/555 HTTP/1.1
+Host: shop.example.com
+
+Change to /orders/556. Now the app may show Order 556 (someone else’s order).
+
+JSON Body Tampering:
+
+POST /api/order/update HTTP/1.1
+Content-Type: application/json
+
+{"order_id": 555, "status": "shipped"}
+
+Modify to:
+
+POST /api/order/update HTTP/1.1
+Content-Type: application/json
+
+{"order_id": 556, "status": "shipped"}
+
+This might update order 556 (another user’s order) without authorization.
+
+Parameter Pollution (Multiple IDs):
+
+GET /api/account?id=100&account=admin HTTP/1.1
+
+Try sending both id and id:
+
+GET /api/account?id=100&id=200 HTTP/1.1
+
+Depending on server behavior, you might get data for id=200. OWASP calls this HTTP parameter pollution.
+
+Content-Type Trick: If an endpoint expects XML, try JSON:
+
+POST /api/chat/join/123 HTTP/1.1
+Content-Type: application/xml
+
+<user>alice</user>
+
+Then:
+
+POST /api/chat/join/123 HTTP/1.1
+Content-Type: application/json
+
+{"user": "alice"}
+
+Some servers implement auth differently per content type.
+
+Wildcard or Array: Some backends parse these specially.
+
+Replace a numeric ID with * (if it doesn’t error out). e.g. GET /api/users/*.
+
+Wrap an ID in an array: send {"id":[19]} instead of {"id":19}. This can bypass simple integer checks.
+
+
+
+Each example shows how little changes can expose unauthorized data. Always be creative with encoding, capitalization, and formatting when testing payloads.
+
+Bug Bounty Case Studies
+
+HackerOne Statistics (2024): In its 7th Annual report, HackerOne noted IDOR issues accounted for 7% of all vulnerabilities reported on the platform.  They were especially common in government (15% of reports) and automotive (11%) programs. This underscores that IDOR remains a frequent find in real bounties.
+
+Telecom Business Site (2022): A HackerOne researcher (“reachaxis”) found an IDOR on a telecom company’s business portal, mtnbusiness.com.ng. Because the app lacked proper authorization checks, “remote users were able to alter the account information of any other user” simply by changing an ID in the API.
+
+Facebook Profile API (2019): Security researchers discovered that Facebook’s API allowed changing any user’s profile picture by modifying the user_id parameter. In other words, they could update someone else’s profile (limited to the picture) without permission.
+
+Uber Ride Details (2020): A bug in Uber’s API let attackers access other riders’ trip details. By tweaking the ride_id in the request, a researcher could fetch data for any ride, not just their own.
+
+Shopify GraphQL (2022): (Example) An IDOR was found in a GraphQL billing endpoint where invoice IDs could be changed in GraphQL queries, exposing other merchants’ invoices.
+
+Other Reports: Numerous HackerOne/Hacktivity write-ups document IDOR in web apps, mobile apps, and APIs. For instance, one bug report showed a user adding a public review to any hacker’s profile due to an IDOR. (In that case, the reporter illustrated how a public-review form on hacker profiles could be manipulated to attach reviews to unrelated profiles.)
+
+
+These cases highlight typical impacts: unauthorized data access or modification. In bug bounty terms, IDORs often rate as high severity because they directly undermine authorization. When writing reports, referencing such real examples can strengthen your case.
+
+Learning Checklist & Milestones
+
+1. Grasp the Basics: Read OWASP’s Broken Access Control guidance, especially the IDOR section. Understand that IDOR is fundamentally an authorization bug. Follow blog tutorials (e.g. on Medium or Hacktivity talks) to see common scenarios.
+
+
+2. Set Up a Lab: Practice on intentionally vulnerable apps (OWASP Juice Shop, WebGoat, or PortSwigger’s Labs). Create at least two user accounts (normal user and “victim” user) so you can swap between them.
+
+
+3. Manual Testing Skills: Learn to intercept requests with Burp Suite or your proxy of choice. Get comfortable changing URL parameters, JSON fields, cookies, etc. Follow OWASP’s advice to map all locations where object references occur and attempt to retrieve or modify each as another user.
+
+
+4. Master Tools:
+
+Practice using Burp Intruder or ffuf/wfuzz to automate ID fuzzing.
+
+Install Burp extensions like Paramalyzer (to keep track of parameters) and Autorize (to test access controls).
+
+Use GraphQL tools to introspect and map API schemas.
+
+
+
+5. API & Mobile Focus: Work through REST API challenges (e.g. HackTheBox or CTF REST challenges) to find IDORs in JSON bodies or headers. Learn GraphQL basics and how to request its schema (introspection). For mobile, practice intercepting app traffic (run an app in an emulator, proxy the device) and apply the same IDOR tests to its API calls.
+
+
+6. Real-World Examples: Read published IDOR bug reports on HackerOne or Bugcrowd. See how researchers document the issue and the impact. Try to reproduce similar bugs on test sites.
+
+
+7. Reporting Practice: When you find an IDOR, draft a write-up. Include steps, snippets of HTTP requests, and indicate why it’s an auth bypass. Refer to OWASP or known case studies for context. This will prepare you for writing real reports.
+
+
+
+By hitting these milestones – theory, hands-on testing, and report writing – you’ll develop a systematic approach to IDOR. Remember to keep learning: follow blogs (e.g. HackerOne, security researchers on Twitter) and update your techniques with each new vulnerability you encounter.
+
+Tips for Writing High-Quality IDOR Reports
+
+Clear Title & Classification: Label it as an Insecure Direct Object Reference (Broken Access Control). Citing OWASP can add authority. For example, note that OWASP defines 
